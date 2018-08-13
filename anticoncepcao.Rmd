@@ -1,0 +1,724 @@
+---
+title: "Característica das usuárias de métodos anticoncepcionais na Atenção Primária de Florianópolis"
+author: ""
+date: "July 6, 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = FALSE,
+	message = FALSE,
+	warning = FALSE
+)
+options("scipen"=100, "digits"=4)#usar notação decimal
+knitr::opts_chunk$set(cache=TRUE)#otimizar a utilização de memória cache
+
+```
+
+```{r}
+#Bibliotecas
+library(readr)
+library(knitr)
+library(tidyverse)
+library(reshape2)
+library(rowr)
+library(lme4)
+library(nlme)
+library(caret)
+```
+
+
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE}
+#Importando o banco de dados
+anticoncepcao <- read_csv("ahco_leandro_novo.csv")
+
+#Retirando diafragma pela baixa quantidade de prescrição e MEDROXIPROGESTERONA, ACET. 10 MG, pois é para tratamento e não para anticoncepção
+anticoncepcao <- subset(anticoncepcao, anticoncepcao$NM_MEDICAMENTO != "DIAFRAGMA NO. 65"| is.na(anticoncepcao$NM_MEDICAMENTO))
+anticoncepcao <- subset(anticoncepcao, anticoncepcao$NM_MEDICAMENTO != "DIAFRAGMA NO. 70"| is.na(anticoncepcao$NM_MEDICAMENTO))
+anticoncepcao <- subset(anticoncepcao, anticoncepcao$NM_MEDICAMENTO != "MEDROXIPROGESTERONA, ACET. 10 MG"| is.na(anticoncepcao$NM_MEDICAMENTO))
+
+#Trasformando variáveis categóricas em fatores e ordenando
+##Uso(1) ou(O) não de DIU
+anticoncepcao$USO_DIU <- ifelse(is.na(anticoncepcao$DIU),0,1) %>% as.factor()
+
+
+#Cor da pele
+anticoncepcao$RACA_COR <- as.factor(anticoncepcao$RACA_COR)
+#summary(anticoncepcao$RACA_COR)
+#print(levels(anticoncepcao$RACA_COR))
+anticoncepcao$RACA_COR <- factor(anticoncepcao$RACA_COR, levels(anticoncepcao$RACA_COR)[c(2,1,3:5)]) #Reordenando os níveis para que "BRANCA" seja a referência
+
+#Escolaridade
+anticoncepcao$ESCOLARIDADE <- as.factor(anticoncepcao$ESCOLARIDADE)
+#summary(anticoncepcao$ESCOLARIDADE)
+#print(levels(anticoncepcao$ESCOLARIDADE))
+anticoncepcao$ESCOLARIDADE <- factor(anticoncepcao$ESCOLARIDADE, levels(anticoncepcao$ESCOLARIDADE)[c(2,8,3,10,11,6,7,4,5,1,9)]) #Reordenando os níveis para que "DOUTORADO" seja a referência
+
+#Especialidade
+#Com relação a especialidade, existem algumas prescrições, onde consta Administrativo, Agente Comunitário, Auxiliar de Enfermagem, Odontologia, Odont s/ACD, 38318. Como provavelmente é um erro, essas informações foram suprimidas para essas pacientes. Criou-se, então uma nova variável ESPECIALIDADE_GRUPO, com as seguintes categorias: ENFERMEIRO(Enfermagem),MÉDICO DE FAMÍLIA (Médico Família), OUTRO MÉDICO (Clínico Geral PMM, Cardiologia,Geriatria, Clínico Geral, Psiquiatria, Pediat/ Nutri, Pediatria)
+anticoncepcao_1 <- anticoncepcao[!is.na(anticoncepcao$ESPECIALIDADE),]
+
+for(i in 1:nrow(anticoncepcao_1)){
+                    if (anticoncepcao_1$ESPECIALIDADE[i] == "Enfermagem"){
+                    anticoncepcao_1$ESPECIALIDADE_GRUPO[i] <- "ENFERMEIRO"
+                    } else if (anticoncepcao_1$ESPECIALIDADE[i] == "Administrativo" | 
+                             anticoncepcao_1$ESPECIALIDADE[i] == "Agente Comunitário" |
+                             anticoncepcao_1$ESPECIALIDADE[i] == "Auxiliar de Enfermagem" |
+                             anticoncepcao_1$ESPECIALIDADE[i] == "Odontologia" |
+                             anticoncepcao_1$ESPECIALIDADE[i] == "Odont s/ACD" |
+                             anticoncepcao_1$ESPECIALIDADE[i] == "38318"){
+                    anticoncepcao_1$ESPECIALIDADE_GRUPO[i] <- NA     
+                    } else if (anticoncepcao_1$ESPECIALIDADE[i] == "Clínico Geral PMM" | 
+                             anticoncepcao_1$ESPECIALIDADE[i] == "Cardiologia" |
+                             anticoncepcao_1$ESPECIALIDADE[i] == "Geriatria" |
+                             anticoncepcao_1$ESPECIALIDADE[i] == "Clínico Geral" |
+                             anticoncepcao_1$ESPECIALIDADE[i] == "Psiquiatria" |
+                             anticoncepcao_1$ESPECIALIDADE[i] == "Pediat/ Nutri" |
+                             anticoncepcao_1$ESPECIALIDADE[i] == "Pediatria"){
+                    anticoncepcao_1$ESPECIALIDADE_GRUPO[i] <- "OUTRO MÉDICO" 
+                    } else if (anticoncepcao_1$ESPECIALIDADE[i] == "Médico Família"){
+                    anticoncepcao_1$ESPECIALIDADE_GRUPO[i] <- "MÉDICO DE FAMÍLIA" 
+                    } else {
+                    anticoncepcao_1$ESPECIALIDADE_GRUPO[i] <- NA
+                    } 
+}
+
+
+
+anticoncepcao <- merge(x = anticoncepcao, y = anticoncepcao_1[,c(5,10,13,17)], by = c("USUARIO", "ID_ATENDIMENTO", "PROFISSIONAL"))
+anticoncepcao_1 <- NULL
+
+anticoncepcao$ESPECIALIDADE <- as.factor(anticoncepcao$ESPECIALIDADE)
+anticoncepcao$DISTRITO <- as.factor(anticoncepcao$DISTRITO)
+anticoncepcao$UNIDADE <- as.factor(anticoncepcao$UNIDADE)
+anticoncepcao$UNIDADE_AREA <- paste0(anticoncepcao$UNIDADE,"_", anticoncepcao$AREA)
+anticoncepcao$UNIDADE_AREA <- as.factor(anticoncepcao$UNIDADE_AREA)
+
+
+
+
+
+
+#Para que as idades e a escolaridade não varie com o tempo, faremos paineis anuais
+anticoncepcao$ANO_ATENDIMENTO <- str_sub(anticoncepcao$DIA_ATENDIMENTO,-4,-1)
+anticoncepcao_17 <- subset(anticoncepcao, anticoncepcao$ANO_ATENDIMENTO == "2017")
+anticoncepcao_16 <- subset(anticoncepcao, anticoncepcao$ANO_ATENDIMENTO == "2016")
+anticoncepcao_15 <- subset(anticoncepcao, anticoncepcao$ANO_ATENDIMENTO == "2015")
+anticoncepcao_14 <- subset(anticoncepcao, anticoncepcao$ANO_ATENDIMENTO == "2014")
+anticoncepcao_13 <- subset(anticoncepcao, anticoncepcao$ANO_ATENDIMENTO == "2013")
+
+```
+
+##Descrição da população por ano
+
+A população em estudo consiste de `r count(unique(anticoncepcao_13$USUARIO))` mulheres em 2013, `r count(unique(anticoncepcao_14$USUARIO))`, em 2014, `r count(unique(anticoncepcao_15$USUARIO))` em 2015, `r count(unique(anticoncepcao_16$USUARIO))`, em 2016 e `r count(unique(anticoncepcao_17$USUARIO))` em 2017.
+Esta população foi analisada em relação à idade, escolaridade e cor da pele, como descrito a seguir.
+
+###Mulheres que receberam prescrição de anticoncepção por idade
+
+**Tabela XXX** - Distribuição dos quartis de idade, segundo o ano
+```{r message=FALSE, warning=FALSE, paged.print=FALSE}
+
+#mediana das idade
+anticoncepcao_por_idade_mediana <- rowr::cbind.fill(anticoncepcao_13$IDADE, anticoncepcao_14$IDADE, anticoncepcao_15$IDADE, anticoncepcao_16$IDADE, anticoncepcao_17$IDADE, fill = NA) 
+names(anticoncepcao_por_idade_mediana) <- c("2013", "2014", "2015", "2016", "2017")
+summary(anticoncepcao_por_idade_mediana)
+
+```
+
+**Figura XXX** - Box-plot da idade, segundo o ano
+```{r}
+boxplot(anticoncepcao_por_idade_mediana)
+```
+
+
+**Figura XXX** - Distribuição das idades, segundo ano
+```{r}
+
+#merge das idade
+anticoncepcao_por_idade_13 <- table(anticoncepcao_13$IDADE) %>% as.data.frame()
+anticoncepcao_por_idade_14 <- table(anticoncepcao_14$IDADE) %>% as.data.frame()
+anticoncepcao_por_idade_15 <- table(anticoncepcao_15$IDADE) %>% as.data.frame()
+anticoncepcao_por_idade_16 <- table(anticoncepcao_16$IDADE) %>% as.data.frame()
+anticoncepcao_por_idade_17 <- table(anticoncepcao_17$IDADE) %>% as.data.frame()
+anticoncepcao_por_idade <- cbind(anticoncepcao_por_idade_13, anticoncepcao_por_idade_14[,2], anticoncepcao_por_idade_15[,2], anticoncepcao_por_idade_16[,2], anticoncepcao_por_idade_17[,2])
+names(anticoncepcao_por_idade) <- c("IDADE", "2013", "2014", "2015", "2016", "2017")
+
+anticoncepcao_por_idade$IDADE <- as.factor(anticoncepcao_por_idade$IDADE)
+anticoncepcao_por_idade <- melt(anticoncepcao_por_idade)
+names(anticoncepcao_por_idade) <- c("IDADE", "ANO", "VALOR")
+
+ggplot(anticoncepcao_por_idade)+
+    geom_col(aes(x = anticoncepcao_por_idade$ANO, y = anticoncepcao_por_idade$VALOR, fill = anticoncepcao_por_idade$IDADE), position = position_stack(reverse = T))+
+    labs(fill = "IDADE")+
+    xlab("ANO")+
+    ylab("VALOR")
+
+
+
+
+
+```
+
+
+###Prescrição de anticoncepção por cor de pele
+```{r}
+
+#merge das raca_cor
+anticoncepcao_por_raca_cor_13 <- table(anticoncepcao_13$RACA_COR) %>% as.data.frame()
+anticoncepcao_por_raca_cor_14 <- table(anticoncepcao_14$RACA_COR) %>% as.data.frame()
+anticoncepcao_por_raca_cor_15 <- table(anticoncepcao_15$RACA_COR) %>% as.data.frame()
+anticoncepcao_por_raca_cor_16 <- table(anticoncepcao_16$RACA_COR) %>% as.data.frame()
+anticoncepcao_por_raca_cor_17 <- table(anticoncepcao_17$RACA_COR) %>% as.data.frame()
+anticoncepcao_por_raca_cor <- cbind(anticoncepcao_por_raca_cor_13, anticoncepcao_por_raca_cor_14[,2], anticoncepcao_por_raca_cor_15[,2], anticoncepcao_por_raca_cor_16[,2], anticoncepcao_por_raca_cor_17[,2])
+names(anticoncepcao_por_raca_cor) <- c("RACA_COR", "2013", "2014", "2015", "2016", "2017")
+knitr::kable(anticoncepcao_por_raca_cor)
+anticoncepcao_por_raca_cor <- melt(anticoncepcao_por_raca_cor)
+names(anticoncepcao_por_raca_cor) <- c("RACA_COR", "ANO", "VALOR")
+
+ggplot(anticoncepcao_por_raca_cor)+
+    geom_col(aes(x = anticoncepcao_por_raca_cor$ANO, y = anticoncepcao_por_raca_cor$VALOR, fill = anticoncepcao_por_raca_cor$RACA_COR))+
+    labs(fill = "COR DA PELE")+
+    xlab("ANO")+
+    ylab("VALOR")+
+    ggtitle("ANTICONCEPÇÃO POR COR DA PELE")
+
+
+
+
+
+```
+
+
+##Prescrição de anticoncepção por escolaridade
+```{r}
+#merge das escolaridades_areas
+anticoncepcao_por_escolaridade_13 <- table(anticoncepcao_13$ESCOLARIDADE) %>% as.data.frame()
+anticoncepcao_por_escolaridade_14 <- table(anticoncepcao_14$ESCOLARIDADE) %>% as.data.frame()
+anticoncepcao_por_escolaridade_15 <- table(anticoncepcao_15$ESCOLARIDADE) %>% as.data.frame()
+anticoncepcao_por_escolaridade_16 <- table(anticoncepcao_16$ESCOLARIDADE) %>% as.data.frame()
+anticoncepcao_por_escolaridade_17 <- table(anticoncepcao_17$ESCOLARIDADE) %>% as.data.frame()
+anticoncepcao_por_escolaridade <- cbind(anticoncepcao_por_escolaridade_13, anticoncepcao_por_escolaridade_14[,2], anticoncepcao_por_escolaridade_15[,2], anticoncepcao_por_escolaridade_16[,2], anticoncepcao_por_escolaridade_17[,2])
+names(anticoncepcao_por_escolaridade) <- c("ESCOLARIDADE", "2013", "2014", "2015", "2016", "2017")
+knitr::kable(anticoncepcao_por_escolaridade)
+anticoncepcao_por_escolaridade <- melt(anticoncepcao_por_escolaridade)
+names(anticoncepcao_por_escolaridade) <- c("ESCOLARIDADE", "ANO", "VALOR")
+
+ggplot(anticoncepcao_por_escolaridade)+
+    geom_col(aes(x = anticoncepcao_por_escolaridade$ANO, y = anticoncepcao_por_escolaridade$VALOR, fill = anticoncepcao_por_escolaridade$ESCOLARIDADE))+
+    labs(fill = "ESCOLARIDADE")+
+    xlab("ANO")+
+    ylab("VALOR")+
+    ggtitle("ANTICONCEPÇÃO POR ESCOLARIDADE")
+
+
+
+
+
+```
+
+
+
+##Recategorização
+Como o número de participantes em algumas categorias é muito pequeno, as variáveis foram recategorizadas da seguinte forma:
+Cor da Pele: Branca, Parda, Preta, Outras (Amarela e Indígena)
+Escolaridade: Alta (Doutorado, Mestrado, Especialização/Residencia, Superior completo e Superior incompleto), Média (Médio completo (2° grau) e Médio incompleto (2° grau)) e Baixa(Fundamental completo (1° grau) e Fundamental incompleto (1° grau)). Como a taxa de analfabetismo em Florianópolis é baixa e a escolaridade média é a maior entre as capitais, é pouco provável que os elevados números de mulheres nas categrias Alfabetizado e Não sabe ler / escrever estejam corretos, principalmente para a faixa etária analizada (15 a 49 anos), uma vez que a maior quantidade de pessoas com baixa escolarização em adultos encontra-se entre os mais velhos. Desta forma, as informações sobre estas categorias não foram levadas em consideração.
+
+
+```{r}
+#Recategorizando Cor da Pele
+
+#Cor da Pele
+anticoncepcao$RACA_COR <- as.character(anticoncepcao$RACA_COR)
+anticoncepcao_1 <- anticoncepcao[!is.na(anticoncepcao$RACA_COR),] 
+
+for(i in 1:nrow(anticoncepcao_1)){
+                    if (anticoncepcao_1$RACA_COR[i] == "BRANCA"){
+                    anticoncepcao_1$RACA_COR_GRUPO[i] <- "BRANCA"} 
+                    else if (anticoncepcao_1$RACA_COR[i] == "AMARELA" | anticoncepcao_1$RACA_COR[i] == "INDIGENA"){
+                    anticoncepcao_1$RACA_COR_GRUPO[i] <- "OUTRAS"     
+                    } else if (anticoncepcao_1$RACA_COR[i] == "PARDA"){
+                    anticoncepcao_1$RACA_COR_GRUPO[i] <- "PARDA" 
+                    } else if (anticoncepcao_1$RACA_COR[i] == "PRETA"){
+                    anticoncepcao_1$RACA_COR_GRUPO[i] <- "PRETA" 
+                    }else {
+                    anticoncepcao_1$RACA_COR_GRUPO[i] <- NA
+                    } 
+}
+
+anticoncepcao <- merge(x = anticoncepcao, y = anticoncepcao_1[,c(1,2,3,20)], by = c("USUARIO", "ID_ATENDIMENTO", "PROFISSIONAL"))
+anticoncepcao <- unique(anticoncepcao)
+anticoncepcao_1 <- NULL
+
+
+```
+
+
+
+
+```{r}
+#Recategorizando Escolaridade
+
+#Escolaridade
+anticoncepcao$ESCOLARIDADE <- as.character(anticoncepcao$ESCOLARIDADE)
+anticoncepcao_1 <- anticoncepcao[!is.na(anticoncepcao$ESCOLARIDADE),] 
+
+for(i in 1:nrow(anticoncepcao_1)){
+                    if (anticoncepcao_1$ESCOLARIDADE[i] == "Fundamental incompleto (1° grau)" | anticoncepcao_1$ESCOLARIDADE[i] == "Fundamental completo (1° grau)"){
+                    anticoncepcao_1$ESCOL_GRUPO[i] <- "baixa"} 
+                    else if (anticoncepcao_1$ESCOLARIDADE[i] == "Médio incompleto (2° grau)" | anticoncepcao_1$ESCOLARIDADE[i] == "Médio completo (2° grau)"){
+                    anticoncepcao_1$ESCOL_GRUPO[i] <- "média"     
+                    } else if (anticoncepcao_1$ESCOLARIDADE[i] == "Superior incompleto" | anticoncepcao_1$ESCOLARIDADE[i] == "Superior completo" |anticoncepcao_1$ESCOLARIDADE[i] == "Especialização/Residencia" | anticoncepcao_1$ESCOLARIDADE[i] == "Mestrado" | anticoncepcao_1$ESCOLARIDADE[i] == "Doutorado"){
+                    anticoncepcao_1$ESCOL_GRUPO[i] <- "alta"  
+                    }else {
+                    anticoncepcao_1$ESCOL_GRUPO[i] <- NA
+                    } 
+}
+
+anticoncepcao <- merge(x = anticoncepcao, y = anticoncepcao_1[,c(1,2,3,21)], by = c("USUARIO", "ID_ATENDIMENTO", "PROFISSIONAL"))
+anticoncepcao <- unique(anticoncepcao)
+anticoncepcao_1 <- NULL
+
+#Escrevendo novas bases de dados
+write.csv(anticoncepcao, "anticoncepcao_nova.csv", fileEncoding = "UTF-8")
+
+```
+
+
+
+```{r}
+#Lendo nova base
+anticoncepcao <- read_csv("anticoncepcao_nova.csv")
+
+#Ajustando os fatores
+#Cor da pele
+anticoncepcao$RACA_COR_GRUPO <- as.factor(anticoncepcao$RACA_COR_GRUPO)
+#summary(anticoncepcao$RACA_COR_GRUPO)
+#print(levels(anticoncepcao$RACA_COR_GRUPO))
+anticoncepcao$RACA_COR_GRUPO <- factor(anticoncepcao$RACA_COR_GRUPO, levels(anticoncepcao$RACA_COR_GRUPO)[c(1,3,4,2)]) #Reordenando os níveis para que "BRANCA" seja a referência
+
+
+#Escolaridade
+anticoncepcao$ESCOL_GRUPO <- as.factor(anticoncepcao$ESCOL_GRUPO)
+#summary(anticoncepcao$ESCOL_GRUPO)
+#print(levels(anticoncepcao$ESCOL_GRUPO))
+anticoncepcao$ESCOL_GRUPO <- factor(anticoncepcao$ESCOL_GRUPO, levels(anticoncepcao$ESCOL_GRUPO)[c(1,3,2)]) #Reordenando os níveis para que "DOUTORADO" seja a referência
+
+#Para que as idades e a escolaridade não varie com o tempo, faremos paineis anuais
+anticoncepcao$ANO_ATENDIMENTO <- str_sub(anticoncepcao$DIA_ATENDIMENTO,-4,-1)
+anticoncepcao_17 <- subset(anticoncepcao, anticoncepcao$ANO_ATENDIMENTO == "2017")
+anticoncepcao_16 <- subset(anticoncepcao, anticoncepcao$ANO_ATENDIMENTO == "2016")
+anticoncepcao_15 <- subset(anticoncepcao, anticoncepcao$ANO_ATENDIMENTO == "2015")
+anticoncepcao_14 <- subset(anticoncepcao, anticoncepcao$ANO_ATENDIMENTO == "2014")
+anticoncepcao_13 <- subset(anticoncepcao, anticoncepcao$ANO_ATENDIMENTO == "2013")
+
+
+```
+
+###Prescrição de anticoncepção por cor de pele
+```{r}
+
+#merge das raca_cor_grupo
+anticoncepcao_por_raca_cor_grupo_13 <- table(anticoncepcao_13$RACA_COR_GRUPO) %>% as.data.frame()
+anticoncepcao_por_raca_cor_grupo_14 <- table(anticoncepcao_14$RACA_COR_GRUPO) %>% as.data.frame()
+anticoncepcao_por_raca_cor_grupo_15 <- table(anticoncepcao_15$RACA_COR_GRUPO) %>% as.data.frame()
+anticoncepcao_por_raca_cor_grupo_16 <- table(anticoncepcao_16$RACA_COR_GRUPO) %>% as.data.frame()
+anticoncepcao_por_raca_cor_grupo_17 <- table(anticoncepcao_17$RACA_COR_GRUPO) %>% as.data.frame()
+anticoncepcao_por_raca_cor_grupo <- cbind(anticoncepcao_por_raca_cor_grupo_13, anticoncepcao_por_raca_cor_grupo_14[,2], anticoncepcao_por_raca_cor_grupo_15[,2], anticoncepcao_por_raca_cor_grupo_16[,2], anticoncepcao_por_raca_cor_grupo_17[,2])
+names(anticoncepcao_por_raca_cor_grupo) <- c("RACA_COR_GRUPO", "2013", "2014", "2015", "2016", "2017")
+knitr::kable(anticoncepcao_por_raca_cor_grupo)
+anticoncepcao_por_raca_cor_grupo <- melt(anticoncepcao_por_raca_cor_grupo)
+names(anticoncepcao_por_raca_cor_grupo) <- c("RACA_COR_GRUPO", "ANO", "VALOR")
+
+ggplot(anticoncepcao_por_raca_cor_grupo)+
+    geom_col(aes(x = anticoncepcao_por_raca_cor_grupo$ANO, y = anticoncepcao_por_raca_cor_grupo$VALOR, fill = anticoncepcao_por_raca_cor_grupo$RACA_COR_GRUPO))+
+    labs(fill = "COR DA PELE")+
+    xlab("ANO")+
+    ylab("VALOR")+
+    ggtitle("ANTICONCEPÇÃO POR COR DA PELE")
+
+
+
+
+
+```
+
+
+##Prescrição de anticoncepção por escolaridade
+```{r}
+#merge das escol_grupos_areas
+anticoncepcao_por_escol_grupo_13 <- table(anticoncepcao_13$ESCOL_GRUPO) %>% as.data.frame()
+anticoncepcao_por_escol_grupo_14 <- table(anticoncepcao_14$ESCOL_GRUPO) %>% as.data.frame()
+anticoncepcao_por_escol_grupo_15 <- table(anticoncepcao_15$ESCOL_GRUPO) %>% as.data.frame()
+anticoncepcao_por_escol_grupo_16 <- table(anticoncepcao_16$ESCOL_GRUPO) %>% as.data.frame()
+anticoncepcao_por_escol_grupo_17 <- table(anticoncepcao_17$ESCOL_GRUPO) %>% as.data.frame()
+anticoncepcao_por_escol_grupo <- cbind(anticoncepcao_por_escol_grupo_13, anticoncepcao_por_escol_grupo_14[,2], anticoncepcao_por_escol_grupo_15[,2], anticoncepcao_por_escol_grupo_16[,2], anticoncepcao_por_escol_grupo_17[,2])
+names(anticoncepcao_por_escol_grupo) <- c("ESCOL_GRUPO", "2013", "2014", "2015", "2016", "2017")
+knitr::kable(anticoncepcao_por_escol_grupo)
+anticoncepcao_por_escol_grupo <- melt(anticoncepcao_por_escol_grupo)
+names(anticoncepcao_por_escol_grupo) <- c("ESCOL_GRUPO", "ANO", "VALOR")
+
+ggplot(anticoncepcao_por_escol_grupo)+
+    geom_col(aes(x = anticoncepcao_por_escol_grupo$ANO, y = anticoncepcao_por_escol_grupo$VALOR, fill = anticoncepcao_por_escol_grupo$ESCOL_GRUPO))+
+    labs(fill = "ESCOL_GRUPO")+
+    xlab("ANO")+
+    ylab("VALOR")+
+    ggtitle("ANTICONCEPÇÃO POR ESCOL_GRUPO")
+
+
+
+
+
+```
+
+
+
+##Análise das Prescrições e da Inserção de DIU
+A distribuição das prescrições de métodos anticoncepcionais e a implantação do DIU foi analisada de acordo com os Centros de Saúde, áreas de abrangência das equipes de saúde da família e profissional prescritor.
+
+
+###Prescrição de anticoncepção por unidade
+```{r}
+#merge das unidades
+anticoncepcao_por_unidade_13 <- table(anticoncepcao_13$UNIDADE) %>% as.data.frame()
+anticoncepcao_por_unidade_14 <- table(anticoncepcao_14$UNIDADE) %>% as.data.frame()
+anticoncepcao_por_unidade_15 <- table(anticoncepcao_15$UNIDADE) %>% as.data.frame()
+anticoncepcao_por_unidade_16 <- table(anticoncepcao_16$UNIDADE) %>% as.data.frame()
+anticoncepcao_por_unidade_17 <- table(anticoncepcao_17$UNIDADE) %>% as.data.frame()
+anticoncepcao_por_unidade <- cbind(anticoncepcao_por_unidade_13, anticoncepcao_por_unidade_14[,2], anticoncepcao_por_unidade_15[,2], anticoncepcao_por_unidade_16[,2], anticoncepcao_por_unidade_17[,2])
+names(anticoncepcao_por_unidade) <- c("UNIDADE", "2013", "2014", "2015", "2016", "2017")
+knitr::kable(anticoncepcao_por_unidade)
+
+boxplot(anticoncepcao_por_unidade[,-1])
+```
+
+###Prescrição de anticoncepção por area
+```{r}
+#merge das unidade_area
+anticoncepcao_por_unidade_area_13 <- table(anticoncepcao_13$UNIDADE_AREA) %>% as.data.frame()
+anticoncepcao_por_unidade_area_14 <- table(anticoncepcao_14$UNIDADE_AREA) %>% as.data.frame()
+anticoncepcao_por_unidade_area_15 <- table(anticoncepcao_15$UNIDADE_AREA) %>% as.data.frame()
+anticoncepcao_por_unidade_area_15 <- subset(anticoncepcao_por_unidade_area_15, anticoncepcao_por_unidade_area_15$Var1 != "NA_NA")
+anticoncepcao_por_unidade_area_16 <- table(anticoncepcao_16$UNIDADE_AREA) %>% as.data.frame()
+anticoncepcao_por_unidade_area_17 <- table(anticoncepcao_17$UNIDADE_AREA) %>% as.data.frame()
+anticoncepcao_por_unidade_area <- cbind(anticoncepcao_por_unidade_area_13, anticoncepcao_por_unidade_area_14[,2], anticoncepcao_por_unidade_area_15[,2], anticoncepcao_por_unidade_area_16[,2], anticoncepcao_por_unidade_area_17[,2])
+names(anticoncepcao_por_unidade_area) <- c("UNIDADE_AREA", "2013", "2014", "2015", "2016", "2017")
+knitr::kable(anticoncepcao_por_unidade_area)
+
+boxplot(anticoncepcao_por_unidade_area[,-1])
+```
+
+
+
+
+##Correlação entre as variáveis preditoras
+```{r}
+#Comparação entre grupos - COR DA PELE
+#m <- table(hiv$SUBGRUPOS, hiv$OBITO)
+#m
+#chisq.test(m)
+#chisq.post.hoc(m, test='chisq.test')
+
+```
+
+
+##Métos prescritos na atenção primária de Florianópolis
+Para esta análise, foram extraídos dados de prescrição de métodos anticoncepcionais e de inserção de DIU, na atenção primária de Florianópolis, no período de 01 de janeiro de 2013 a 31 de dezembro de 2017. As solicitações de laquedura e vazectomia não foram avaliadas.11
+
+**Tabela XX** - Lista dos métodos prescritos e quantidade de prescrições 
+```{r}
+#Quantidade prescrita em 2013
+qtd_prescrita_outros_13<-table(anticoncepcao_13$NM_MEDICAMENTO) %>% as.data.frame()
+qtd_prescrita_diu_13<-table(anticoncepcao_13$DIU) %>% as.data.frame()
+qtd_prescrita_13 <- rbind(qtd_prescrita_outros_13, qtd_prescrita_diu_13)
+names(qtd_prescrita_13) <- c("METODO", "QUANTIDADE_13")
+qtd_prescrita_13$PERCENTUAL_13 <- qtd_prescrita_13$QUANTIDADE/sum(qtd_prescrita_13$QUANTIDADE)*100
+qtd_prescrita_13 <- qtd_prescrita_13[order(qtd_prescrita_13$QUANTIDADE, decreasing = T),]
+#Quantidade prescrita em 2014
+qtd_prescrita_outros_14<-table(anticoncepcao_14$NM_MEDICAMENTO) %>% as.data.frame()
+qtd_prescrita_diu_14<-table(anticoncepcao_14$DIU) %>% as.data.frame()
+qtd_prescrita_14 <- rbind(qtd_prescrita_outros_14, qtd_prescrita_diu_14)
+names(qtd_prescrita_14) <- c("METODO", "QUANTIDADE_14")
+qtd_prescrita_14$PERCENTUAL_14 <- qtd_prescrita_14$QUANTIDADE/sum(qtd_prescrita_14$QUANTIDADE)*100
+qtd_prescrita_14 <- qtd_prescrita_14[order(qtd_prescrita_14$QUANTIDADE, decreasing = T),]
+#Quantidade prescrita em 2015
+qtd_prescrita_outros_15<-table(anticoncepcao_15$NM_MEDICAMENTO) %>% as.data.frame()
+qtd_prescrita_diu_15<-table(anticoncepcao_15$DIU) %>% as.data.frame()
+qtd_prescrita_15 <- rbind(qtd_prescrita_outros_15, qtd_prescrita_diu_15)
+names(qtd_prescrita_15) <- c("METODO", "QUANTIDADE_15")
+qtd_prescrita_15$PERCENTUAL_15 <- qtd_prescrita_15$QUANTIDADE/sum(qtd_prescrita_15$QUANTIDADE)*100
+qtd_prescrita_15 <- qtd_prescrita_15[order(qtd_prescrita_15$QUANTIDADE, decreasing = T),]
+#Quantidade prescrita em 2016
+qtd_prescrita_outros_16<-table(anticoncepcao_16$NM_MEDICAMENTO) %>% as.data.frame()
+qtd_prescrita_diu_16<-table(anticoncepcao_16$DIU) %>% as.data.frame()
+qtd_prescrita_16 <- rbind(qtd_prescrita_outros_16, qtd_prescrita_diu_16)
+names(qtd_prescrita_16) <- c("METODO", "QUANTIDADE_16")
+qtd_prescrita_16$PERCENTUAL_16 <- qtd_prescrita_16$QUANTIDADE/sum(qtd_prescrita_16$QUANTIDADE)*100
+qtd_prescrita_16 <- qtd_prescrita_16[order(qtd_prescrita_16$QUANTIDADE, decreasing = T),]
+#Quantidade prescrita em 2017
+qtd_prescrita_outros_17<-table(anticoncepcao_17$NM_MEDICAMENTO) %>% as.data.frame()
+qtd_prescrita_diu_17<-table(anticoncepcao_17$DIU) %>% as.data.frame()
+qtd_prescrita_17 <- rbind(qtd_prescrita_outros_17, qtd_prescrita_diu_17)
+names(qtd_prescrita_17) <- c("METODO", "QUANTIDADE_17")
+qtd_prescrita_17$PERCENTUAL_17 <- qtd_prescrita_17$QUANTIDADE/sum(qtd_prescrita_17$QUANTIDADE)*100
+qtd_prescrita_17 <- qtd_prescrita_17[order(qtd_prescrita_17$QUANTIDADE, decreasing = T),]
+#Unindo as tabelas
+qtd_prescrita <- cbind(qtd_prescrita_13, qtd_prescrita_14, qtd_prescrita_15, qtd_prescrita_16, qtd_prescrita_17)
+qtd_prescrita <- qtd_prescrita[,-c(4,7,10,13)]
+knitr::kable(qtd_prescrita, row.names = F)
+
+```
+
+
+
+Estes métodos foram agrupados de modo que se formassem os seguinte grupos: anticoncepcional injetável com 3 meses de duração (MEDROXIPROGESTERONA, ACETATO DE - 150MG/ML- INJ), anticoncepcional injetável com 1 mês de duração (ENANTATO NORETISTERONA  + VALERATO ESTRADIOL 50 MG +5MG /ML INJET), aco (LEVONORGESTREL 0,15 MG + ETINILESTRADIOL 0,03 MG; GESTODENO 0,075 MG + ETINILESTRADIOL 0,02 MG; DESOGESTREL 0,15 MG + ETINILESTRADIOL 0,03 MG); aco de baixa dosagem (NORETISTERONA 0,35 MG); aco de emergência (LEVONORGESTREL 0,75 MG); e inserção de DIU.
+
+
+```{r}
+#Recategorizando métodos
+
+anticoncepcao$USO_DIU <- as.character(anticoncepcao$USO_DIU)
+for(i in 1:nrow(anticoncepcao)){
+                    if (anticoncepcao$USO_DIU[i] == 1){
+                    anticoncepcao$METODO[i] <- "diu"    
+                    } else if (anticoncepcao$NM_MEDICAMENTO[i] == "MEDROXIPROGESTERONA, ACETATO DE - 150MG/ML- INJ"){
+                    anticoncepcao$METODO[i] <- "inj_3m"
+                    } else if (anticoncepcao$NM_MEDICAMENTO[i] == "ENANTATO NORETISTERONA  + VALERATO ESTRADIOL 50 MG +5MG /ML INJET"){
+                    anticoncepcao$METODO[i] <- "inj_1m"
+                    } else if (anticoncepcao$NM_MEDICAMENTO[i] == "LEVONORGESTREL 0,15 MG + ETINILESTRADIOL 0,03 MG" | anticoncepcao$NM_MEDICAMENTO[i] == "GESTODENO 0,075 MG + ETINILESTRADIOL 0,02 MG" | anticoncepcao$NM_MEDICAMENTO[i] == "DESOGESTREL 0,15 MG + ETINILESTRADIOL 0,03 MG"){
+                    anticoncepcao$METODO[i] <- "aco"
+                    } else if (anticoncepcao$NM_MEDICAMENTO[i] == "NORETISTERONA 0,35 MG"){
+                    anticoncepcao$METODO[i] <- "aco_baixa"
+                    } else if (anticoncepcao$NM_MEDICAMENTO[i] == "LEVONORGESTREL 0,75 MG"){
+                    anticoncepcao$METODO[i] <- "emergencia"
+                    }else {
+                    anticoncepcao$METODO[i] <- NA
+                    } 
+}
+
+anticoncepcao$USO_DIU <- as.factor(anticoncepcao$USO_DIU)
+
+#Para que as idades e a escolaridade não varie com o tempo, faremos paineis anuais
+anticoncepcao$ANO_ATENDIMENTO <- str_sub(anticoncepcao$DIA_ATENDIMENTO,-4,-1)
+anticoncepcao_17 <- subset(anticoncepcao, anticoncepcao$ANO_ATENDIMENTO == "2017")
+anticoncepcao_16 <- subset(anticoncepcao, anticoncepcao$ANO_ATENDIMENTO == "2016")
+anticoncepcao_15 <- subset(anticoncepcao, anticoncepcao$ANO_ATENDIMENTO == "2015")
+anticoncepcao_14 <- subset(anticoncepcao, anticoncepcao$ANO_ATENDIMENTO == "2014")
+anticoncepcao_13 <- subset(anticoncepcao, anticoncepcao$ANO_ATENDIMENTO == "2013")
+
+
+```
+
+
+
+**Tabela 01** - Lista dos métodos prescritos e quantidade de prescrições 
+```{r}
+#Quantidade prescrita em 2013
+qtd_prescrita_13<-table(anticoncepcao_13$METODO) %>% as.data.frame()
+names(qtd_prescrita_13) <- c("METODO", "QUANTIDADE_13")
+qtd_prescrita_13$PERCENTUAL_13 <- qtd_prescrita_13$QUANTIDADE/sum(qtd_prescrita_13$QUANTIDADE)*100
+qtd_prescrita_13 <- qtd_prescrita_13[order(qtd_prescrita_13$QUANTIDADE, decreasing = T),]
+#Quantidade prescrita em 2014
+qtd_prescrita_14<-table(anticoncepcao_14$METODO) %>% as.data.frame()
+names(qtd_prescrita_14) <- c("METODO", "QUANTIDADE_14")
+qtd_prescrita_14$PERCENTUAL_14 <- qtd_prescrita_14$QUANTIDADE/sum(qtd_prescrita_14$QUANTIDADE)*100
+qtd_prescrita_14 <- qtd_prescrita_14[order(qtd_prescrita_14$QUANTIDADE, decreasing = T),]
+#Quantidade prescrita em 2015
+qtd_prescrita_15<-table(anticoncepcao_15$METODO) %>% as.data.frame()
+names(qtd_prescrita_15) <- c("METODO", "QUANTIDADE_15")
+qtd_prescrita_15$PERCENTUAL_15 <- qtd_prescrita_15$QUANTIDADE/sum(qtd_prescrita_15$QUANTIDADE)*100
+qtd_prescrita_15 <- qtd_prescrita_15[order(qtd_prescrita_15$QUANTIDADE, decreasing = T),]
+#Quantidade prescrita em 2016
+qtd_prescrita_16<-table(anticoncepcao_16$METODO) %>% as.data.frame()
+names(qtd_prescrita_16) <- c("METODO", "QUANTIDADE_16")
+qtd_prescrita_16$PERCENTUAL_16 <- qtd_prescrita_16$QUANTIDADE/sum(qtd_prescrita_16$QUANTIDADE)*100
+qtd_prescrita_16 <- qtd_prescrita_16[order(qtd_prescrita_16$QUANTIDADE, decreasing = T),]
+#Quantidade prescrita em 2017
+qtd_prescrita_17<-table(anticoncepcao_17$METODO) %>% as.data.frame()
+names(qtd_prescrita_17) <- c("METODO", "QUANTIDADE_17")
+qtd_prescrita_17$PERCENTUAL_17 <- qtd_prescrita_17$QUANTIDADE/sum(qtd_prescrita_17$QUANTIDADE)*100
+qtd_prescrita_17 <- qtd_prescrita_17[order(qtd_prescrita_17$QUANTIDADE, decreasing = T),]
+#Unindo as tabelas
+qtd_prescrita <- cbind(qtd_prescrita_13, qtd_prescrita_14, qtd_prescrita_15, qtd_prescrita_16, qtd_prescrita_17)
+qtd_prescrita <- qtd_prescrita[,-c(4,7,10,13)]
+knitr::kable(qtd_prescrita, row.names = F)
+
+```
+
+
+
+## Análise Multivariada
+
+Escalar e centralizar as variáveis
+
+Transformar a variável método em dummy
+
+
+**Tabela 01** - Lista dos métodos prescritos e quantidade de prescrições por profissão
+```{r}
+#Para fazer a regressão, cada prescrição/procedimento, foi considerado como ocorrendo em uma mulher diferente
+#Não deveria ser dados pareados?
+
+glm(USO_DIU ~ IDADE+RACA_COR_GRUPO+ESCOL_GRUPO,family = "binomial", data = anticoncepcao_13) %>% summary()
+glm(USO_DIU ~ IDADE+RACA_COR_GRUPO+ESCOL_GRUPO,family = "binomial", data = anticoncepcao_14) %>% summary()
+glm(USO_DIU ~ IDADE+RACA_COR_GRUPO+ESCOL_GRUPO,family = "binomial", data = anticoncepcao_15) %>% summary()
+glm(USO_DIU ~ IDADE+RACA_COR_GRUPO+ESCOL_GRUPO,family = "binomial", data = anticoncepcao_16) %>% summary()
+glm(USO_DIU ~ IDADE+RACA_COR_GRUPO+ESCOL_GRUPO,family = "binomial", data = anticoncepcao_17) %>% summary()
+
+```
+
+
+
+
+
+
+
+
+
+
+**Tabela 01** - Lista dos métodos prescritos e quantidade de prescrições por profissão
+```{r}
+#Modelo apenas com o intecepto
+anticoncepcao$USO_DIU <- as.factor(anticoncepcao$USO_DIU)
+anticoncepcao$USUARIO <- as.factor(anticoncepcao$USUARIO)
+anticoncepcao$UNIDADE_AREA <- as.factor(anticoncepcao$UNIDADE_AREA)
+anticoncepcao$UNIDADE <- as.factor(anticoncepcao$UNIDADE)
+anticoncepcao$DISTRITO <- as.factor(anticoncepcao$DISTRITO)
+anticoncepcao$ANO_ATENDIMENTO <- as.factor(anticoncepcao$ANO_ATENDIMENTO)
+anticoncepcao$ESPECIALIDADE_GRUPO <- as.factor(anticoncepcao$ESPECIALIDADE_GRUPO)
+
+
+#Foram analisados os seguintes modelos
+#modelo 1 - USUARIO
+#modelo 2 - ESPECIALIDADE_GRUPO/USUARIO
+#modelo 3 - UNIDADE_AREA/ESPECIALIDADE_GRUPO/USUARIO - modelo não convergiu, pois há muitos fatores que ficam com zero observações
+#modelo 4 - UNIDADE/ESPECIALIDADE_GRUPO/USUARIO - retidado UNIDADE_AREA, ainda assim, modelo não convergiu, pois há muitos fatores que ficam com zero observações
+#modelo 5 - DISTRITO/ESPECIALIDADE_GRUPO/USUARIO - não foi melhor que o modelo 2
+#modelo 6 - ANO_ATENDIMENTO/ESPECIALIDADE_GRUPO/USUARIO - não foi melhor que o modelo 2
+
+
+model_diu_1 <- glm(USO_DIU ~1, 
+                   family = "binomial", 
+                   data = anticoncepcao)
+summary(model_diu_1)
+
+
+model_diu_2 <- glmer(USO_DIU ~ (1|USUARIO), 
+                   family = "binomial", 
+                   data = anticoncepcao)
+summary(model_diu_2)
+
+model_diu_3 <- glmer(USO_DIU ~ (1|ESPECIALIDADE_GRUPO/USUARIO), 
+                   family = "binomial", 
+                   data = anticoncepcao)
+summary(model_diu_3)
+
+
+model_diu_4 <- glmer(USO_DIU ~ (1|UNIDADE_AREA/ESPECIALIDADE_GRUPO/USUARIO), #Não convergiu, pois há muitos fatores que ficam com zero observações
+                   family = "binomial", 
+                   data = anticoncepcao, maxit)
+summary(model_diu_4)
+
+
+model_diu_5 <- glmer(USO_DIU ~ (1|UNIDADE/ESPECIALIDADE_GRUPO/USUARIO), #Não convergiu, pois há muitos fatores que ficam com zero observações
+                   family = "binomial", 
+                   data = anticoncepcao)
+summary(model_diu_5)
+
+model_diu_6 <- glmer(USO_DIU ~ (1|DISTRITO/ESPECIALIDADE_GRUPO/USUARIO), #Não foi melhor que o modelo 3
+                   family = "binomial", 
+                   data = anticoncepcao)
+summary(model_diu_6)
+
+model_diu_7 <- glmer(USO_DIU ~ (1|ANO_ATENDIMENTO/ESPECIALIDADE_GRUPO/USUARIO), #Não foi melhor que o modelo 3
+                   family = "binomial", 
+                   data = anticoncepcao)
+summary(model_diu_7)
+
+
+
+model_diu_8 <- glmer(USO_DIU ~ (1|UNIDADE_AREA/USUARIO), 
+                   family = "binomial", 
+                   data = anticoncepcao)
+summary(model_diu_8)
+
+
+
+model_diu_9 <- glmer(USO_DIU ~ (1|UNIDADE/UNIDADE_AREA/USUARIO), 
+                   family = "binomial", 
+                   data = anticoncepcao)
+summary(model_diu_9)
+
+
+model_diu_10 <- glmer(USO_DIU ~ (1|DISTRITO/UNIDADE/USUARIO), 
+                   family = "binomial", 
+                   data = anticoncepcao)
+summary(model_diu_10)
+
+
+model_diu_11 <- glmer(USO_DIU ~ (1|ANO_ATENDIMENTO/UNIDADE/USUARIO), 
+                   family = "binomial", 
+                   data = anticoncepcao)
+summary(model_diu_11)
+
+model_diu_12 <- glmer(USO_DIU ~ (1|DISTRITO/UNIDADE/USUARIO), 
+                   family = "binomial", 
+                   data = anticoncepcao)
+summary(model_diu_12)
+
+model_diu_13 <- glmer(USO_DIU ~ (1|DISTRITO/USUARIO), 
+                   family = "binomial", 
+                   data = anticoncepcao)
+summary(model_diu_13)
+
+model_diu_14 <- glmer(USO_DIU ~ (1|ANO_ATENDIMENTO/DISTRITO/USUARIO), 
+                   family = "binomial", 
+                   data = anticoncepcao)
+summary(model_diu_14)
+
+model_diu_15 <- glmer(USO_DIU ~ (1|ANO_ATENDIMENTO/USUARIO), 
+                   family = "binomial", 
+                   data = anticoncepcao)
+summary(model_diu_15)
+
+
+
+
+```
+
+##Análise Multivariada Multinível
+Espera-se que em territórios com maior nível socioenconômico haja maior inserção de DIU, assim como em unidades maiores onde uma equipe sensibilizada possa influenciar as demais ou em equipes onde haja um ou mais profissionais capacitados para a implantação. Para se controlar o efeito do nível socioeconônico do território (dados pela renda ou escolaridade média do território. ver o que é melhor), das unidades () e das equipes será utilizado modelo multinível, tendo estes parâmetros como efeitos randômicos. Sendo o território, um nível, o centro de saúde o nível inferior e a equipe o último nível.
+
+Com relacão a unidade, produzir variável com número de equipes e número de equipes com residentes
+
+Com relação a equipe, informar se ela é composta por residente ou não.
+
+A profissão também é um nível (diferenciar especialidades médicas e essas dos enfermeiros?)
+
+O ano também é um nível. As mulheres também deveriam ser um nível e o método o último nível? Pensar nisso pois as mulheres se repetem. Porém elas podem procurar outras equipes, em outras unidades e em outros territórios. Outra questão é que elas mudam de idade e de escolaridade com o passar do tempo. 
+
+Criar uma variável com o tempo que cada mulher utilizou o método anticoncepcional. Considerar que ela fez uso até uma nova prescrição ou até colocar o diu
+
+A escolaridade é um problema, pois tende-se a inserir essa informação uma única vez no prontuário das mulheres.
+
+
+```{r}
+#Modelo apenas com o intecepto
+glmer(USO_DIU ~ 1,family = "binomial", data = anticoncepcao_13) %>% summary()
+glmer(USO_DIU ~ (1|) ,family = "binomial", data = anticoncepcao_13) %>% summary()
+
+
+
+
+#Para fazer a regressão, cada prescrição/procedimento, foi considerado como ocorrendo em uma mulher diferente
+#Não deveria ser dados pareados?
+
+glm(USO_DIU ~ IDADE+RACA_COR+ESCOL_GRUPO,family = "binomial", data = anticoncepcao_13) %>% summary()
+glm(USO_DIU ~ IDADE+RACA_COR+ESCOL_GRUPO,family = "binomial", data = anticoncepcao_14) %>% summary()
+glm(USO_DIU ~ IDADE+RACA_COR+ESCOL_GRUPO,family = "binomial", data = anticoncepcao_15) %>% summary()
+glm(USO_DIU ~ IDADE+RACA_COR+ESCOL_GRUPO,family = "binomial", data = anticoncepcao_16) %>% summary()
+glm(USO_DIU ~ IDADE+RACA_COR+ESCOL_GRUPO,family = "binomial", data = anticoncepcao_17) %>% summary()
+
+```

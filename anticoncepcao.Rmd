@@ -26,6 +26,10 @@ library(rowr)
 library(lme4)
 library(nlme) 
 library(caret)
+library(kableExtra)
+library(skimr)
+library(ranger)
+library(glmnet)
 ```
 
 
@@ -573,11 +577,6 @@ glm(USO_DIU ~ IDADE+RACA_COR_GRUPO+ESCOL_GRUPO,family = "binomial", data = antic
 
 
 
-
-
-
-
-
 **Tabela 01** - Lista dos métodos prescritos e quantidade de prescrições por profissão
 ```{r}
 #Modelo apenas com o intecepto
@@ -590,6 +589,7 @@ anticoncepcao$ANO_ATENDIMENTO <- as.factor(anticoncepcao$ANO_ATENDIMENTO)
 anticoncepcao$ESPECIALIDADE_GRUPO <- as.factor(anticoncepcao$ESPECIALIDADE_GRUPO)
 
 
+'
 #Foram analisados os seguintes modelos
 #modelo 1 - USUARIO
 #modelo 2 - ESPECIALIDADE_GRUPO/USUARIO
@@ -682,11 +682,194 @@ model_diu_15 <- glmer(USO_DIU ~ (1|ANO_ATENDIMENTO/USUARIO),
                    family = "binomial", 
                    data = anticoncepcao)
 summary(model_diu_15)
-
-
+'
 
 
 ```
+
+
+```{r}
+#Modelo apenas com o intecepto
+'
+anticoncepcao$USO_DIU <- as.factor(anticoncepcao$USO_DIU)
+anticoncepcao$USUARIO <- as.factor(anticoncepcao$USUARIO)
+anticoncepcao$UNIDADE_AREA <- as.factor(anticoncepcao$UNIDADE_AREA)
+anticoncepcao$UNIDADE <- as.factor(anticoncepcao$UNIDADE)
+anticoncepcao$DISTRITO <- as.factor(anticoncepcao$DISTRITO)
+anticoncepcao$ANO_ATENDIMENTO <- as.factor(anticoncepcao$ANO_ATENDIMENTO)
+anticoncepcao$ESPECIALIDADE_GRUPO <- as.factor(anticoncepcao$ESPECIALIDADE_GRUPO)
+'
+
+##################################################################################################################################
+
+## Criando a amostra de treino com 75% do tamanho da amostra total e amostra de teste com 25%
+smp_size <- floor(0.75 * nrow(anticoncepcao))
+
+train_ind <- sample(seq_len(nrow(anticoncepcao)), size = smp_size)
+
+train <- anticoncepcao[train_ind, ]
+test <- anticoncepcao[-train_ind, ]
+
+'
+rl_diu <- glm(USO_DIU ~ IDADE + RACA_COR_GRUPO + ESPECIALIDADE + UNIDADE_AREA + ESCOL_GRUPO, data = anticoncepcao_t, family = "binomial") 
+print(summary(rl_diu))
+'
+
+train_prep <- train[,c(9,17,18,19,21,22)]
+
+#REGRESSÂO LOGÍSTICA
+rl_diu <- glm(USO_DIU ~ IDADE + RACA_COR_GRUPO + ESPECIALIDADE_GRUPO + UNIDADE_AREA, data = train_prep, family = "binomial") 
+print(summary(rl_diu))
+
+#train_fit <- glm(USO_DIU ~ IDADE + ESPECIALIDADE_GRUPO + UNIDADE_AREA + RACA_COR_GRUPO + ESCOL_GRUPO, data = train_prep, family=binomial(link='logit'))
+
+#knitr::kable(coefficients(summary(rl_diu)),
+#             align = c('r'), caption = "Regressão logistica: USO_DIU e Todas Variáveis", "html") %>% kable_styling(full_width = T)
+#anova(rl_diu, test="Chisq")
+
+```
+
+
+```{r}
+train_prep <- train[,c(9,17,18,19,21,22)]
+
+#REGRESSÂO LOGÍSTICA
+rl_diu <- glm(USO_DIU ~ IDADE + RACA_COR_GRUPO + ESPECIALIDADE_GRUPO + UNIDADE_AREA + ESCOL_GRUPO, data = train_prep, family = "binomial") 
+print(summary(rl_diu))
+```
+
+
+
+```{r}
+test_prep <- test[,c(9,17,18,19,21,22)]
+
+test_probs <- predict(rl_diu,test_prep,type='response')
+test_fit <- glm(USO_DIU ~ IDADE + RACA_COR_GRUPO + ESPECIALIDADE_GRUPO + UNIDADE_AREA + ESCOL_GRUPO, data = test_prep, family=binomial(link='logit'))
+#knitr::kable(coefficients(summary(test_fit)),
+#             align = c('r'), caption = "Regressão logistica: USO_DIU e Todas Variáveis", "html") %>% kable_styling(full_width = T)
+hist(test_probs)
+anova(test_fit, test="Chisq")
+```
+
+
+```{r}
+anticoncepcao_t <- anticoncepcao[, c(9,17,18,19,20,21,22)]
+anticoncepcao_t <- na.omit(anticoncepcao_t)
+
+anticoncepcao_t$USO_DIU <- ifelse(anticoncepcao_t$USO_DIU==0, anticoncepcao_t$USO_DIU<-'não', anticoncepcao_t$USO_DIU<-'sim')
+
+#Create train/test index
+myFolds <- createFolds(anticoncepcao_t$USO_DIU, k = 5)
+
+
+# Create trainControl object: myControl - Deve ser utilizado em todos os modelos para que sejam comparáveis
+myControl <- trainControl(
+  method = "cv",
+  number = 10,
+  repeats = 5,
+  summaryFunction = twoClassSummary,
+  classProbs = TRUE, # IMPORTANT!
+  verboseIter = TRUE,
+  savePredictions = TRUE,
+  index = myFolds
+)
+
+```
+
+####Regressão Logistica com Cross Validation e cálculo da AUC
+```{r }
+
+# Train glm with custom trainControl: model
+model_reglog <- train(USO_DIU ~ IDADE + ESPECIALIDADE_GRUPO + ESCOL_GRUPO + RACA_COR_GRUPO,
+               metric = "ROC",
+               method = "glm",
+               data = anticoncepcao_t,
+               preProcess = c("center", "scale"),
+               trControl = myControl)
+
+
+# Print model to console
+model_reglog
+
+max(model_reglog$results$ROC)
+
+
+```
+
+#Lasso(alpha = 1)-Ridge(alpha = 0) Regression
+```{r }
+
+
+# Fit glmnet model: model
+model_glmnet <- train(
+  USO_DIU ~., anticoncepcao_t,
+  preProcess = c("center", "scale"),
+  metric = "ROC",
+  method = "glmnet",
+  tuneGrid = expand.grid(
+        alpha = 0:1,
+        lambda  = seq(0.0001, 1, length = 10)),
+  trControl = myControl
+)
+
+# Print model to console
+model_glmnet
+
+# Print maximum ROC statistic
+max(model_glmnet[["results"]][["ROC"]])
+
+#Plot results
+plot(model_glmnet)
+plot(model_glmnet$finalModel)
+
+```
+
+#Random forest com cross validation e tuneLength =3
+```{r }
+#levels(anticoncepcao_t) <- c("first_class", "second_class")
+
+# Fit random forest: model
+model_rf <- train(
+  USO_DIU ~ .,
+  #preProcess = "medianImpute", #imputado valores nas células NA quando se trabalhar com variáveis contínulas
+  tuneLength = 3,
+  data = anticoncepcao_t,
+  metric = "ROC",
+  method = "ranger",
+  trControl = myControl
+)
+
+# Print model to console
+model_rf
+
+# Plot model
+plot(model_rf)
+```
+
+###Comparando os modelos
+```{r }
+
+# Create model_list
+model_list <- list(regLog = model_reglog, glmnet = model_glmnet, rf = model_rf)
+
+
+# Pass model_list to resamples(): resamples
+resamples <- resamples(model_list, measures = list(tpr, fpr, fnr, acc), show.info = T)
+
+# Summarize the results
+summary(resamples)
+
+#Box-plot
+bwplot(resamples, metric = "ROC")
+
+#Scatter-plot
+xyplot(resamples, metric = "ROC")
+
+dotplot(resamples, metric = "ROC")
+
+densityplot(resamples, metric = "ROC")
+```
+
 
 ##Análise Multivariada Multinível
 Espera-se que em territórios com maior nível socioenconômico haja maior inserção de DIU, assim como em unidades maiores onde uma equipe sensibilizada possa influenciar as demais ou em equipes onde haja um ou mais profissionais capacitados para a implantação. Para se controlar o efeito do nível socioeconônico do território (dados pela renda ou escolaridade média do território. ver o que é melhor), das unidades () e das equipes será utilizado modelo multinível, tendo estes parâmetros como efeitos randômicos. Sendo o território, um nível, o centro de saúde o nível inferior e a equipe o último nível.
@@ -708,8 +891,6 @@ A escolaridade é um problema, pois tende-se a inserir essa informação uma ún
 #Modelo apenas com o intecepto
 glmer(USO_DIU ~ 1,family = "binomial", data = anticoncepcao_13) %>% summary()
 glmer(USO_DIU ~ (1|) ,family = "binomial", data = anticoncepcao_13) %>% summary()
-
-
 
 
 #Para fazer a regressão, cada prescrição/procedimento, foi considerado como ocorrendo em uma mulher diferente

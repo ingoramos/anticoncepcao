@@ -1,0 +1,301 @@
+---
+title: "Anticoncepcao_ml_models"
+output: html_document
+---
+#Opções e configurações
+```{r}
+
+knitr::opts_chunk$set(
+	echo = FALSE,
+	message = FALSE,
+	warning = FALSE
+)
+options("scipen"=100, "digits"=4)#usar notação decimal
+knitr::opts_chunk$set(cache=TRUE)#otimizar a utilização de memória cache
+
+```
+#Bibliotecas Usadas
+```{r}
+
+#Bibliotecas
+library(caret)
+library(readr)
+library(knitr)
+library(tidyverse)
+library(reshape2)
+library(rowr)
+library(lme4)
+library(nlme) 
+library(kableExtra)
+library(skimr)
+library(ranger)
+library(glmnet)
+library(adabag)
+library(rpart)
+library(mlbench)
+library(variables)
+#rodar as funções em mais de um core do computador
+#library(parallel)
+#library(snow)
+#boosting data
+library(gbm)
+#dealing with imbalanced data
+library(ROSE)
+#ROC Curves
+library(pROC)
+#clustering
+library(cluster)
+library(CrossClustering)
+#modelo KNN ML
+library(kknn)
+```
+
+#Lendo nova base
+```{r}
+
+anticoncepcao <- read_csv("anticoncepcao_nova.csv")
+
+```
+
+#Ajustando os fatores
+#Cor da pele
+```{r}
+
+anticoncepcao$RACA_COR_GRUPO <- as.factor(anticoncepcao$RACA_COR_GRUPO)
+#summary(anticoncepcao$RACA_COR_GRUPO)
+#print(levels(anticoncepcao$RACA_COR_GRUPO))
+anticoncepcao$RACA_COR_GRUPO <- factor(anticoncepcao$RACA_COR_GRUPO, levels(anticoncepcao$RACA_COR_GRUPO)[c(1,3,4,2)]) #Reordenando os níveis para que "BRANCA" seja a referência
+
+```
+
+
+#Escolaridade
+```{r}
+
+anticoncepcao$ESCOL_GRUPO <- as.factor(anticoncepcao$ESCOL_GRUPO)
+#summary(anticoncepcao$ESCOL_GRUPO)
+#print(levels(anticoncepcao$ESCOL_GRUPO))
+anticoncepcao$ESCOL_GRUPO <- factor(anticoncepcao$ESCOL_GRUPO, levels(anticoncepcao$ESCOL_GRUPO)[c(1,3,2)]) #Reordenando os níveis para que "DOUTORADO" seja a referência
+
+```
+
+
+#Para que as idades e a escolaridade não varie com o tempo, faremos paineis anuais
+```{r}
+
+anticoncepcao$ANO_ATENDIMENTO <- str_sub(anticoncepcao$DIA_ATENDIMENTO,-4,-1)
+anticoncepcao_17 <- subset(anticoncepcao, anticoncepcao$ANO_ATENDIMENTO == "2017")
+anticoncepcao_16 <- subset(anticoncepcao, anticoncepcao$ANO_ATENDIMENTO == "2016")
+anticoncepcao_15 <- subset(anticoncepcao, anticoncepcao$ANO_ATENDIMENTO == "2015")
+anticoncepcao_14 <- subset(anticoncepcao, anticoncepcao$ANO_ATENDIMENTO == "2014")
+anticoncepcao_13 <- subset(anticoncepcao, anticoncepcao$ANO_ATENDIMENTO == "2013")
+
+```
+
+
+
+Estes métodos foram agrupados de modo que se formassem os seguinte grupos: anticoncepcional injetável com 3 meses de duração (MEDROXIPROGESTERONA, ACETATO DE - 150MG/ML- INJ), anticoncepcional injetável com 1 mês de duração (ENANTATO NORETISTERONA + VALERATO ESTRADIOL 50 MG +5MG /ML INJET), aco (LEVONORGESTREL 0,15 MG + ETINILESTRADIOL 0,03 MG; GESTODENO 0,075 MG + ETINILESTRADIOL 0,02 MG; DESOGESTREL 0,15 MG + ETINILESTRADIOL 0,03 MG); aco de baixa dosagem (NORETISTERONA 0,35 MG); aco de emergência (LEVONORGESTREL 0,75 MG); e inserção de DIU.
+#Recategorizando métodos
+```{r}
+
+anticoncepcao$USO_DIU <- as.character(anticoncepcao$USO_DIU)
+for(i in 1:nrow(anticoncepcao)){
+                    if (anticoncepcao$USO_DIU[i] == 1){
+                    anticoncepcao$METODO[i] <- "diu"    
+                    } else if (anticoncepcao$NM_MEDICAMENTO[i] == "MEDROXIPROGESTERONA, ACETATO DE - 150MG/ML- INJ"){
+                    anticoncepcao$METODO[i] <- "inj_3m"
+                    } else if (anticoncepcao$NM_MEDICAMENTO[i] == "ENANTATO NORETISTERONA  + VALERATO ESTRADIOL 50 MG +5MG /ML INJET"){
+                    anticoncepcao$METODO[i] <- "inj_1m"
+                    } else if (anticoncepcao$NM_MEDICAMENTO[i] == "LEVONORGESTREL 0,15 MG + ETINILESTRADIOL 0,03 MG" | anticoncepcao$NM_MEDICAMENTO[i] == "GESTODENO 0,075 MG + ETINILESTRADIOL 0,02 MG" | anticoncepcao$NM_MEDICAMENTO[i] == "DESOGESTREL 0,15 MG + ETINILESTRADIOL 0,03 MG"){
+                    anticoncepcao$METODO[i] <- "aco"
+                    } else if (anticoncepcao$NM_MEDICAMENTO[i] == "NORETISTERONA 0,35 MG"){
+                    anticoncepcao$METODO[i] <- "aco_baixa"
+                    } else if (anticoncepcao$NM_MEDICAMENTO[i] == "LEVONORGESTREL 0,75 MG"){
+                    anticoncepcao$METODO[i] <- "emergencia"
+                    }else {
+                    anticoncepcao$METODO[i] <- NA
+                    } 
+}
+
+anticoncepcao$USO_DIU <- as.factor(anticoncepcao$USO_DIU)
+
+#Para que as idades e a escolaridade não varie com o tempo, faremos paineis anuais
+anticoncepcao$ANO_ATENDIMENTO <- str_sub(anticoncepcao$DIA_ATENDIMENTO,-4,-1)
+anticoncepcao_17 <- subset(anticoncepcao, anticoncepcao$ANO_ATENDIMENTO == "2017")
+anticoncepcao_16 <- subset(anticoncepcao, anticoncepcao$ANO_ATENDIMENTO == "2016")
+anticoncepcao_15 <- subset(anticoncepcao, anticoncepcao$ANO_ATENDIMENTO == "2015")
+anticoncepcao_14 <- subset(anticoncepcao, anticoncepcao$ANO_ATENDIMENTO == "2014")
+anticoncepcao_13 <- subset(anticoncepcao, anticoncepcao$ANO_ATENDIMENTO == "2013")
+
+```
+
+
+#Criação da amostra de treino e teste
+Regressão Logística para grau de significancia das variáveis
+```{r}
+
+## Criando a amostra de treino com 75% do tamanho da amostra total e amostra de teste com 25%
+smp_size <- floor(0.75 * nrow(anticoncepcao))
+
+train_ind <- sample(seq_len(nrow(anticoncepcao)), size = smp_size)
+
+train <- anticoncepcao[train_ind, ]
+test <- anticoncepcao[-train_ind, ]
+
+
+#rl_diu <- glm(USO_DIU ~ IDADE + RACA_COR_GRUPO + ESPECIALIDADE + UNIDADE_AREA + ESCOL_GRUPO, data = anticoncepcao_t, family = #"binomial") 
+#print(summary(rl_diu))
+
+
+train_prep <- train[,c(9,17,18,19,21,22)]
+
+anticoncepcao_t <- anticoncepcao[, c(9,17,18,19,20,21,22)]
+anticoncepcao_t <- na.omit(anticoncepcao_t)
+
+#anticoncepcao_t$USO_DIU <- ifelse(anticoncepcao_t$USO_DIU==0, anticoncepcao_t$USO_DIU <-'não', anticoncepcao_t$USO_DIU<-'sim')
+
+```
+
+#Opções do K-Folds
+Utilização para controle na aplicação dos modelos de Machine Learning
+```{r}
+
+#Create train/test index
+myFolds <- createFolds(anticoncepcao_t$USO_DIU, k = 5)
+
+
+# Create trainControl object: myControl - Deve ser utilizado em todos os modelos para que sejam comparáveis
+myControl <- trainControl(
+  method = "cv",
+  number = 10,
+  repeats = 5,
+  summaryFunction = twoClassSummary,
+  classProbs = TRUE, # IMPORTANT!
+  verboseIter = TRUE,
+  savePredictions = TRUE,
+  index = myFolds
+)
+
+```
+
+
+```{r}
+#jovens até 19 anos, adultos até 59
+#tentativa de categorizar a variável idade
+train$IDADE <- ifelse(train$IDADE<29, train$IDADE <-'jovens', train$IDADE<-'adultos')
+test$IDADE <- ifelse(test$IDADE<29, test$IDADE <-'jovens', test$IDADE<-'adultos')
+
+train$IDADE <- as.factor(train$IDADE)
+test$IDADE <- as.factor(test$IDADE)
+```
+
+
+#Testes com o dataset para a predição
+O dataset é separado em treino e teste, para o subset de treino é feito o balanceamento dos dados, para que a quantidade de "sim", seja equivalente a de "não" (que no dataset original é maior)
+```{r}
+train_prep <- train[,c(9,17,18,20,21,22)]
+test_prep <- test[,c(9,17,18,20,21,22)]
+
+
+#tentativa de balancear os dados do dataset de treino e aplicar o modelo no dataset de teste (original)
+train_prep <- na.omit(train_prep)
+train_prep$USO_DIU <- ifelse(train_prep$USO_DIU==0, train_prep$USO_DIU<-'não', train_prep$USO_DIU<-'sim')
+
+
+test_prep <- na.omit(test_prep)
+test_prep$USO_DIU <- ifelse(test_prep$USO_DIU==0, test_prep$USO_DIU<-'não', test_prep$USO_DIU<-'sim')
+
+
+treino_uso_sim <- subset(train_prep, train_prep$USO_DIU == "sim")
+treino_uso_nao <- subset(train_prep, train_prep$USO_DIU == "não")
+
+teste_uso_sim <- subset(test_prep, test_prep$USO_DIU == "sim")
+teste_uso_nao <- subset(test_prep, test_prep$USO_DIU == "não")
+
+train_prep$USO_DIU <- as.factor(train_prep$USO_DIU)
+test_prep$USO_DIU <- as.factor(test_prep$USO_DIU) 
+
+#resultado bom com o "N" = 118859.
+balanced_train_data <- ovun.sample(USO_DIU ~ ., data = train_prep, method = "over",N = 111898)$data
+table(balanced_train_data$USO_DIU)
+```
+
+#Modelo Lasso/Ridge
+```{r}
+#Lasso(alpha = 1)-Ridge(alpha = 0) Regression == para a base de dados sem a coluna de escolaridade
+
+# Fit glmnet model: model
+model_glmnet <- train(
+  USO_DIU ~., balanced_train_data,
+  preProcess = c("center", "scale"),
+  metric = "ROC",
+  method = "glmnet",
+  tuneGrid = expand.grid(
+        alpha = 0:1,
+        lambda  = seq(0.0001, 1, length = 10)),
+  trControl = myControl
+)
+
+# Print model to console
+model_glmnet
+
+# Print maximum ROC statistic
+max(model_glmnet[["results"]][["ROC"]])
+
+#Plot results
+plot(model_glmnet)
+plot(model_glmnet$finalModel)
+
+banco_glmnet <- model_glmnet$trainingData
+
+banco_glmnet$.outcome <- as.factor(banco_glmnet$.outcome)
+
+confusionMatrix(banco_glmnet$.outcome, sample(banco_glmnet$.outcome))
+```
+
+#Predição para o modelo Lasso/Ridge
+```{r}
+predictions_glmnet <- predict(model_glmnet, test_prep)
+confusionMatrix(predictions_glmnet, test_prep$USO_DIU)
+```
+
+#Model KNN
+Não deu bons resultados
+```{r}
+'
+#KNN model
+
+# knn model: model
+model_knn <- train(
+  USO_DIU ~., balanced_train_data,
+  preProcess = c("center", "scale"),
+  metric = "ROC",
+  method = "kknn",
+  trControl = myControl
+)
+
+# Print model to console
+model_knn
+
+# Print maximum ROC statistic
+max(model_knn[["results"]][["ROC"]])
+
+#Plot results
+plot(model_knn)
+plot(model_knn$finalModel)
+
+banco_knn <- model_knn$trainingData
+
+banco_knn$.outcome <- as.factor(banco_knn$.outcome)
+
+confusionMatrix(banco_knn$.outcome, sample(banco_knn$.outcome))
+'
+```
+
+```{r}
+'
+predictions_knn <- predict(model_knn, test_prep)
+confusionMatrix(predictions_knn, test_prep$USO_DIU)
+'
+```
+
